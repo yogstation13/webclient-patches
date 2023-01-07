@@ -289,4 +289,4 @@ impl ByondNetMessage {
 // is it?
 
 #[cfg(not(target_pointer_width = "32"))]
-compile_error!("rust-g must be compiled for a 32-bit target");
+compile_error!("this piece of shit must be compiled for a 32-bit target");
