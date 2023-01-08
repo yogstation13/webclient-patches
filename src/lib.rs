@@ -1,6 +1,6 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, CStr};
 use std::{collections::hash_map::HashMap};
 use std::cell::RefCell;
 
@@ -18,7 +18,7 @@ mod byond_export;
 
 thread_local! {
 	static TOKEN_MAP: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
-	static CLIENT_MAP: RefCell<HashMap<u16, String>> = RefCell::new(HashMap::new());
+	static CLIENT_MAP: RefCell<HashMap<u16, (String, String)>> = RefCell::new(HashMap::new());
 }
 static mut LOADED : bool = false;
 
@@ -34,6 +34,28 @@ byond_fn!(
 		Some("")
 	}
 );
+
+fn get_client_info(token: String, client_id: u16) -> Result<String, ()> {
+	CLIENT_MAP.with(|cell| {
+		let mut cmap = cell.borrow_mut();
+		if let Some((cert, info)) = cmap.get(&client_id) {
+			if *cert == token  {
+				return Ok(info.clone());
+			}
+			cmap.remove(&client_id);
+		}
+		TOKEN_MAP.with(|cell| {
+			let mut map = cell.borrow_mut();
+			match map.remove(&token) {
+				Some(info) => {
+					cmap.insert(client_id, (token, info.clone()));
+					Ok(info)
+				},
+				None => Err(())
+			}
+		})
+	})
+}
 
 byond_fn!(
 	fn remove_webclient_patches() {
@@ -115,14 +137,13 @@ fn init_module() -> Result<(), &'static str> {
 			signature!("53 89 45 e0 e8 ?? ?? ?? ?? 8b 4e 24 0f b6 46 20 81 e1 ff ff ff 00"),
 			5
 		);
+		// Instructions on finding this in Ghidra (works on linux too):
+		// Literally just search for the string "web:". You'll have to use the search feature (press S)
+		// and change the type to string. The function that contains that will be the function you want.
 		#[cfg(windows)]
-		let sig_handle_hub_cert = signature!(
-			"55 8b ec 6a ff 68 ?? ?? ?? ?? 64 a1 00 00 00 00 50 81 ec ?? ?? ?? ?? a1 ?? ?? ?? ?? 33 c5 89 45 f0 53 56 57 50 8d 45 f4 64 a3 ?? ?? ?? ?? 8b 75 10 8b 7d 0c 56"
-		);
-		#[cfg(windows)]
-		let sig_receive_login_key = signature!(
-			"55 8b ec 6a ff 68 ?? ?? ?? ?? 64 a1 00 00 00 00 50 81 ec ?? ?? ?? ?? a1 ?? ?? ?? ?? 33 c5 89 45 f0 56 57 50 8d 45 f4 64 a3 ?? ?? ?? ?? 8b 45 0c 8d 8d 40 fb ff ff 8b 75 08 0f b7 f8"
-		);
+		let sig_check_webclient_cert = signature!(
+			"55 8b ec 6a ff 68 ?? ?? ?? ?? 64 a1 00 00 00 00 50 83 ec 08 53 56 57 a1 ?? ?? ?? ?? 33 c5 50 8d 45 f4 64 a3 00 00 00 00 89 4d f0 68 68 04 00 00 e8 ?? ?? ?? ?? 83 c4 04 89 45 ec c7 45 fc 00 00 00 00 85 c0 74 18 6a 00 ff 75 28 8b c8 ff 75 24 68 e6 00 00 00"
+		);// 55 8B EC 6A FF 68 3B 89 88 63 64 A1 00 00 00 00 50 83 EC 08 53 56 57 A1 58 12 8F 63 33 C5 50 8D 45 F4 64 A3 00 00 00 00 89 4D F0 68 68 04 00 00 E8 C5 05 0A 00 83 C4 04 89 45 EC C7 45 FC 00 00 00 00 85 C0 74 18 6A 00 FF 75 28 8B C8 FF 75 24 68 E6 00 00 00 E8 96 6F FF FF 8B F8 EB 02 33 FF 8B 75 0C 32 DB 68 78 60 8A 63 56 C7 45 FC FF FF FF FF FF 15 38 D4 88 63 83 C4 08 0F B6 DB 85 C0 B9 01 00 00 00 8D 47 04 0F 45 D9 8B CF 50 88 5D 28 FF 75 28 E8 C7 51 00 00 8D 47 04 8B CF 50 FF 75 08 E8 29 56 00 00 8D 47 04 8B CF 50 56 E8 1D 56 00 00 80 FB 01 75 5C 8D 77 04 8B CF 56 FF 75 10 E8 0A 56 00 00 8B 5D 14 8B CF 56 53 E8 8E 51 00 00 84 DB 75 44 56 FF 75 18 8B CF E8 EF 55 00 
 		#[cfg(unix)]
 		let sig_short = SigOffset(
 			signature!("89 54 24 08 89 44 24 04 89 34 24 e8 ?? ?? ?? ?? 66 81 63 38 ff bf 8b 5d c4 85 db"),
@@ -139,12 +160,8 @@ fn init_module() -> Result<(), &'static str> {
 			18
 		);
 		#[cfg(unix)]
-		let sig_handle_hub_cert = signature!(
-			"55 89 e5 81 ec d8 04 00 00 0f b7 45 10 89 5d f4 0f b6 5d 08 89 75 f8"
-		);
-		#[cfg(unix)]
-		let sig_receive_login_key = signature!(
-			"55 89 e5 57 56 89 c6 53 89 d3 81 ec dc 04 00 00 0f b7 db 8d 45 a8 c7 45 e0 00 00 00 00 c7 45 dc 00 00 00 00 89 04 24"
+		let sig_check_webclient_cert = signature!(
+			"55 89 e5 57 56 53 83 ec 4c 8b 45 08 8b 55 0c 8b 75 10 0f b6 7d 18 89 45 e0 8b 45 14 89 55 d8 8b 55 1c c7 04 24 5c 04 00 00"
 		);
 
 		// This part patches BYOND's code which encodes modified movables into network messages for the webclient.
@@ -166,7 +183,7 @@ fn init_module() -> Result<(), &'static str> {
 			}
 
 		} else {
-			return Err("Couldn't find short ptr!");
+			return Err("Couldn't find short-write ptr!");
 		}
 
 		// This part hooks the login code so that we can actually login!
@@ -180,108 +197,43 @@ fn init_module() -> Result<(), &'static str> {
 		// - Requiring you to put your thing inside of BYOND's iframe bullshit
 		//   - This solution might make lummox mad at me because it bypasses ads.
 
-		if let Ok(handle_hub_cert) = sig_handle_hub_cert.scan_module(BYONDCORE) {
-			let hook = RawDetour::new(handle_hub_cert as *const (), handle_hub_cert_hook as *const ())
-				.map_err(|_| "Couldn't detour handle_hub_cert")?;
+		if let Ok(check_webclient_cert) = sig_check_webclient_cert.scan_module(BYONDCORE) {
+			let hook = RawDetour::new(check_webclient_cert as *const (), webclient_certificate_hook_platform as *const ())
+				.map_err(|_| "Couldn't detour check_webclient_cert")?;
 			hook.enable()
-				.map_err(|_| "Couldn't enable detour for handle_hub_cert")?;
-			HANDLE_HUB_CERT_ORIGINAL = Some(std::mem::transmute(hook.trampoline()));
+				.map_err(|_| "Couldn't enable detour for check_webclient_cert")?;
 			DETOURS.push(hook);
 		} else {
-			return Err("Couldn't find handle_hub_cert")
-		}
-
-		if let Ok(receive_login_key) = sig_receive_login_key.scan_module(BYONDCORE) {
-			let hook = RawDetour::new(receive_login_key as *const (), _receive_login_key_hook_c as *const ())
-				.map_err(|_| "Couldn't detour receive_login_key")?;
-			hook.enable()
-				.map_err(|_| "Couldn't enable detour for receive_login_key")?;
-			_receive_login_key_orig = std::mem::transmute(hook.trampoline());
-			DETOURS.push(hook);
-		} else {
-			return Err("Couldn't find receive_login_key")
+			return Err("Couldn't find check_webclient_cert")
 		}
 		
 		Ok(())
 	}
 }
 
-//static mut RECEIVE_LOGIN_KEY_ORIGINAL: Option<extern "C" fn(*const ByondNetMessage, u16) -> c_void> = None;
-
-// why the ever living fuck do I have to put underscores on my shit. why do I get linker errors when there's
-// no underscores. what the fuck.
-// why the fuck do I need a shitty ass c file just to use regparm3?
-// I wish I had just written this shit in c
-extern "C" {
-	static mut _receive_login_key_orig : *const c_void;
-	//static _receive_login_key_hook_c : *const c_void;
-	fn _receive_login_key_hook_c(message : *const ByondNetMessage, client_id : u16) -> c_void;
-	fn _receive_login_key_orig_c(message : *const ByondNetMessage, client_id : u16) -> c_void;
-}
-
-#[no_mangle]
-extern "C" fn receive_login_key_hook(message : *const ByondNetMessage, client_id : u16) -> c_void {
-	CLIENT_MAP.with(|cell| {
-		let mut map = cell.borrow_mut();
-		map.remove(&client_id);
-	});
-	
-	let mut ptr : isize = 0;
-	let token = unsafe { (*message).read_string(&mut ptr) };
-	TOKEN_MAP.with(|cell| {
-		let mut map = cell.borrow_mut();
-		if let Some(key_info) = map.remove(&token) {
-			CLIENT_MAP.with(|cell| {
-				let mut map = cell.borrow_mut();
-				map.insert(client_id, key_info);
-			});
-		}
-	});
-	//unsafe { RECEIVE_LOGIN_KEY_ORIGINAL.unwrap()(message, client_id) }
-	unsafe { _receive_login_key_orig_c(message, client_id) }
-}
-
-static mut HANDLE_HUB_CERT_ORIGINAL : Option<extern "C" fn(bool, *const c_char, u16) -> c_void> = None;
-
-#[no_mangle]
-extern "C" fn handle_hub_cert_hook(in_is_valid : bool, in_cert : *const c_char, client_id : u16) -> c_void {
-	let looked_up = CLIENT_MAP.with(|cell| {
-		let mut map = cell.borrow_mut();
-		map.remove(&client_id)
-	});
-	let (is_valid, cert) = match looked_up {
-		Some(info) => (true, byond_return(Some(info.into_bytes()))),
-		_ => (in_is_valid, in_cert)
+unsafe fn webclient_certificate_hook(token:*const c_char,callback : extern "C" fn(bool, *const c_char, u16)->(), client_id:u16) {
+	match get_client_info(unsafe {CStr::from_ptr(token)}.to_string_lossy().into_owned(), client_id) {
+		Ok(cert) => callback(true, byond_return(Some(cert.into_bytes())), client_id),
+		_ => callback(false, byond_return(Some("Auth failed".as_bytes().to_vec())), client_id)
 	};
-	unsafe { HANDLE_HUB_CERT_ORIGINAL.unwrap()(is_valid, cert, client_id)}
 }
 
-#[repr(C)]
-struct ByondNetMessage {
-	msgtype : u16,
-	error_flags : u16,
-	length : isize,
-	unk : u32,
-	data : *mut u8
-}
+// This thing gets called more than once for each player.
+// The first time is on login.
+// Later on, it's called with a different callback that just boots the player out
+// with an undescriptive error message periodically. A previous implementation I did hooked
+// a different function, and it only handled the first time, which meant players could
+// log in but everyone on the server would just get booted out randomly for no reason
+// periodically.
+// Funny enough fixing this actually made this whole library simpler and eliminated the need to include a smidge of c code. So yay?
 
-impl ByondNetMessage {
-	fn read_string(&self, ptr : &mut isize) -> String {
-		if self.length <= *ptr {return "".to_owned()}
-		let mut out_vec : Vec<u8> = Vec::new();
-		unsafe {
-			while *ptr < self.length {
-				let this_ptr = self.data.offset(*ptr);
-				if *this_ptr == 0 {*ptr += 1; break;}
-				out_vec.push(*this_ptr);
-				*ptr += 1;
-			}
-		}
-		return match String::from_utf8(out_vec) {
-			Ok(str) => str,
-			Err(_) => "".to_owned()
-		}
-	}
+#[cfg(windows)]
+extern "fastcall" fn webclient_certificate_hook_platform(_this:u32, _eax:u32, _:u32, token:*const c_char, _:u32, _:u32, _:u32, _:u32, _:u32, callback : extern "C" fn(bool, *const c_char, u16)->(), client_id:u16)->() {
+	unsafe {webclient_certificate_hook(token, callback, client_id);}
+}
+#[cfg(unix)]
+extern "C" fn webclient_certificate_hook_platform(_this:u32, _:u32, token:*const c_char, _:u32, _:u32, _:u32, _:u32, _:u32, callback : extern "C" fn(bool, *const c_char, u16)->(), client_id:u16)->() {
+	unsafe {webclient_certificate_hook(token, callback, client_id);}
 }
 
 // So there, is this shitty little DLL really *that much better* just because I wrote it in rust?
@@ -289,4 +241,4 @@ impl ByondNetMessage {
 // is it?
 
 #[cfg(not(target_pointer_width = "32"))]
-compile_error!("this piece of shit must be compiled for a 32-bit target");
+compile_error!("webclient-patches must be compiled for a 32-bit target");
