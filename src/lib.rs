@@ -71,6 +71,7 @@ byond_fn!(
 struct SigOffset(Signature, u32);
 
 static mut ORIG_REPLACEMENTS : Vec<(*mut u32, u32)> = vec![];
+static mut ORIG_BYTE_REPLACEMENTS : Vec<(*mut u8, Vec<u8>)> = vec![];
 static mut DETOURS : Vec<RawDetour> = vec![];
 
 unsafe fn extract_function_call(sig : SigOffset, module : &str) -> Result<u32, ()> {
@@ -81,6 +82,17 @@ unsafe fn extract_function_call(sig : SigOffset, module : &str) -> Result<u32, (
 			Err(())
 		}
 	}
+}
+unsafe fn replace_bytes(target : *mut u8, bytes : &[u8]) -> Result<(), ()> {
+	unsafe {
+		if let Err(_) = region::protect(target, bytes.len(), region::Protection::READ_WRITE_EXECUTE) {
+			return Err(());
+		}
+		let slice = std::slice::from_raw_parts_mut(target, bytes.len());
+		ORIG_BYTE_REPLACEMENTS.push((target, slice.to_vec()));
+		slice.copy_from_slice(bytes);
+	}
+	Ok(())
 }
 unsafe fn replace_function_call(sig : SigOffset, module : &str, replacement_ptr : u32) -> Result<(), ()> {
 	unsafe {
@@ -104,6 +116,12 @@ fn undo_replacements() {
 			**ptr = *orig;
 		}
 		ORIG_REPLACEMENTS.clear();
+		ORIG_BYTE_REPLACEMENTS.reverse();
+		for (ptr, orig) in ORIG_BYTE_REPLACEMENTS.iter() {
+			let slice = std::slice::from_raw_parts_mut(*ptr, orig.len());
+			slice.copy_from_slice(orig);
+		}
+		ORIG_BYTE_REPLACEMENTS.clear();
 		DETOURS.reverse();
 		for detour in DETOURS.iter() {
 			let _ = detour.disable();
@@ -205,6 +223,71 @@ fn init_module() -> Result<(), &'static str> {
 			DETOURS.push(hook);
 		} else {
 			return Err("Couldn't find check_webclient_cert")
+		}
+
+		// Fixes the wrong object ID being sent when sending contents of turfs within vis_contents
+		// Did I say this looks like a case of code that never was really finished? Oh yeah.
+		// 
+		#[cfg(windows)] {
+			// unfortunately the actual object ID is put in EAX and then thrown away so there's a lot
+			// of twiddling around I had to do to stick it onto the stack and then take it off of the
+			// stack at the correct spot. Basically popping the value after the function call, pushing it
+			// before the next call, popping it again, and then pushing it as the argument to the function
+			// call it actually needs to go to
+
+			if let Ok(obj_ptr) = signature!(
+				"8b 4d e8 8b 41 08 3d ff ff 00 00 74 52 90 50 e8 ?? ?? ?? ?? 8b f8 83 c4 04 85 ff 74 42 53 ff 77 04 ff 37 e8 ?? ?? ?? ?? 8b 4d ec 83 c4 0c 0f b6 c0 50 57 53 ff 75 f0 e8 ?? ?? ?? ??"
+			).scan_module(BYONDCORE) {
+				if let Err(_) = replace_bytes(obj_ptr.offset(22), &[0x5a, 0x90, 0x85, 0xff, 0x74, 0x43, 0x52])
+				.and_then(|_| replace_bytes(obj_ptr.offset(49), &[0x5a, 0x50, 0x57, 0x52, 0x6a, 0x02])) {
+					return Err("Couldn't patch obj in turf in vis contents code");
+				}
+			} else {
+				return Err("Couldn't find obj in turf in vis contents sending code");
+			}
+			
+			if let Ok(mob_ptr) = signature!(
+				"8b 45 e8 8b 40 0c 3d ff ff 00 00 74 53 8b ff 50 e8 ?? ?? ?? ?? 8b f8 83 c4 04 85 ff 74 42 53 ff 77 04 ff 37 e8 ?? ?? ?? ?? 8b 4d ec 83 c4 0c 0f b6 c0 50 57 53 ff 75 f0 e8 ?? ?? ?? ??"
+			).scan_module(BYONDCORE) {
+				if let Err(_) = replace_bytes(mob_ptr.offset(23), &[0x5a, 0x90, 0x85, 0xff, 0x74, 0x43, 0x52])
+				.and_then(|_| replace_bytes(mob_ptr.offset(50), &[0x5a, 0x50, 0x57, 0x52, 0x6a, 0x03])) {
+					return Err("Couldn't patch mob in turf in vis contents code");
+				}
+			} else {
+				return Err("Couldn't find mob in turf in vis contents sending code");
+			}
+		}
+		#[cfg(unix)] {
+			// I love GCC but the code it generates is too optimized and that makes this shit really fucking hard
+			// I ended up removing the checks for `id == 0xFFFF` to make room for this because those checks are redundant... I hope.
+			// the linux version also throws away the ID on me so yeah
+			let id_saver_bytes : [u8] = [0x89, 0x44, 0x24, 0x10, 0x90, 0x90, 0x90];
+			let obj_patch : [u8] = [0x8B, 0x4C, 0x24, 0x10, 0x89, 0x14, 0x24, 0x89, 0x44, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x08, 0xC6, 0x44, 0x24, 0x04, 0x02, 0x90];
+			let mob_patch : [u8] = [0x8B, 0x4C, 0x24, 0x10, 0x89, 0x14, 0x24, 0x89, 0x44, 0x24, 0x10, 0x89, 0x4C, 0x24, 0x08, 0xC6, 0x44, 0x24, 0x04, 0x03, 0x90];
+
+			if let Ok(obj_ptr) = signature!(
+				"3d ff ff 00 00 74 7e 89 7d d0 89 f7 0f b7 75 e2 89 5d c8 eb 53 89 7c 24 08 8b 53 04 8b 00 89 54 24 04 89 04 24 e8 ?? ?? ?? ?? 8b 55 dc 89 5c 24 0c 89 7c 24 08 89 14 24 0f b6 c0 89 44 24 10 8b 45 d0 89 44 24 04 e8 ?? ?? ?? ?? 8b 53 50 09 c6 85 d2 74 0a 8b 45 d4 e8 ?? ?? ?? ?? 09 c6 8b 43 48 3d ff ff 00 00 74 0e"
+			).scan_module(BYONDCORE) {
+				if let Err(_) = replace_bytes(obj_ptr.offset(0), &id_saver_bytes)
+				.and_then(|_| replace_bytes(obj_ptr.offset(0x61), &id_saver_bytes))
+				.and_then(|_| replace_bytes(obj_ptr.offset(0x31), &obj_patch)) {
+					return Err("Couldn't patch obj in turf in vis contents code");
+				}
+			} else {
+				return Err("Couldn't find obj in turf in vis contents sending code");
+			}
+
+			if let Ok(mob_ptr) = signature!(
+				"3d ff ff 00 00 74 76 89 7d d0 89 f7 0f b7 75 e2 89 5d c8 eb 53 89 7c 24 08 8b 53 04 8b 00 89 54 24 04 89 04 24 e8 ?? ?? ?? ?? 8b 55 dc 89 5c 24 0c 89 7c 24 08 89 14 24 0f b6 c0 89 44 24 10 8b 45 d0 89 44 24 04 e8 ?? ?? ?? ?? 8b 53 50 09 c6 85 d2 74 0a 8b 45 d4 e8 ?? ?? ?? ?? 09 c6 8b 43 48 3d ff ff 00 00 74 0e"
+			).scan_module(BYONDCORE) {
+				if let Err(_) = replace_bytes(mob_ptr.offset(0), &id_saver_bytes)
+				.and_then(|_| replace_bytes(mob_ptr.offset(0x61), &id_saver_bytes))
+				.and_then(|_| replace_bytes(mob_ptr.offset(0x31), &mob_patch)) {
+					return Err("Couldn't patch mob in turf in vis contents code");
+				}
+			} else {
+				return Err("Couldn't find mob in turf in vis contents sending code");
+			}
 		}
 		
 		Ok(())
