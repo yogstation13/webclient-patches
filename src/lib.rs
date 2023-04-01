@@ -198,7 +198,7 @@ fn init_module() -> Result<(), &'static str> {
 			}
 			if let Err(_) = replace_function_call(sig_write_flags_modify, BYONDCORE, short_ptr) {
 				return Err("Couldn't find modify-atom flags write call");
-			}
+			}// 00 e9
 
 		} else {
 			return Err("Couldn't find short-write ptr!");
@@ -228,6 +228,8 @@ fn init_module() -> Result<(), &'static str> {
 		// Fixes the wrong object ID being sent when sending contents of turfs within vis_contents
 		// Did I say this looks like a case of code that never was really finished? Oh yeah.
 		// 
+		// The frame loop part disables server-side .dmi parsing. Nothing wrong with it, it works perfectly fine
+		// as long as you have less than 65535 unique frames. If you reach that the server crashes. So let's not.
 		#[cfg(windows)] {
 			// unfortunately the actual object ID is put in EAX and then thrown away so there's a lot
 			// of twiddling around I had to do to stick it onto the stack and then take it off of the
@@ -255,6 +257,16 @@ fn init_module() -> Result<(), &'static str> {
 				}
 			} else {
 				return Err("Couldn't find mob in turf in vis contents sending code");
+			}
+
+			if let Ok(frame_loop_ptr) = signature!(
+				"0f 8e ba 00 00 00 eb 06 8d 9b 00 00 00 00"
+			).scan_module(BYONDCORE) {
+				if let Err(_) = replace_bytes(frame_loop_ptr, &[0x90, 0xe9]) {
+					return Err("Couldn't patch dmi frame loop code");
+				}
+			} else {
+				return Err("Couldn't find dmi frame loop code");
 			}
 		}
 		#[cfg(unix)] {
@@ -287,6 +299,16 @@ fn init_module() -> Result<(), &'static str> {
 				}
 			} else {
 				return Err("Couldn't find mob in turf in vis contents sending code");
+			}
+
+			if let Ok(frame_loop_ptr) = signature!(
+				"0f 8e b4 01 00 00 31 f6 8d bd 1c ff ff ff eb 62 66 90"
+			).scan_module(BYONDCORE) {
+				if let Err(_) = replace_bytes(frame_loop_ptr, &[0x90, 0xe9]) {
+					return Err("Couldn't patch dmi frame loop code");
+				}
+			} else {
+				return Err("Couldn't find dmi frame loop code");
 			}
 		}
 		
