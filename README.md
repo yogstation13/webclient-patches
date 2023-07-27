@@ -1,3 +1,6 @@
+# Deprecation Notice
+This project is no longer being used in production on yogstation. As such, it has been deprecated and is no longer maintained.
+
 # Webclient Patches
 
 A library to patch webclient-related functionality in Dream Daemon
